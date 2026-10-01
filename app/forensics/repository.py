@@ -206,6 +206,8 @@ class ForensicRepository:
         allowed = {
             "forensic_cases", "specimens", "storage_locations", "examinations",
             "review_schedules", "quality_alerts", "release_requests",
+            "appraisal_opinions", "opinion_versions", "review_assignments",
+            "review_findings", "opinion_issuances",
         }
         if table not in allowed:
             raise ValueError("不允许统计该数据表")

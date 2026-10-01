@@ -375,6 +375,136 @@ CREATE TABLE IF NOT EXISTS release_items (
     status TEXT NOT NULL DEFAULT 'requested' CHECK(status IN ('requested','allocated','fulfilled','unavailable')),
     UNIQUE(request_id,case_id)
 );
+-- 复核人回避资质：只有登记在册、专业匹配且未被停权的复核人才能领取
+CREATE TABLE IF NOT EXISTS reviewer_qualifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reviewer TEXT NOT NULL,
+    discipline TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+    note TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(reviewer,discipline)
+);
+-- 鉴定意见签发前复核：意见主表与不可覆盖版本链
+CREATE TABLE IF NOT EXISTS appraisal_opinions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opinion_no TEXT NOT NULL UNIQUE,
+    case_id INTEGER NOT NULL REFERENCES forensic_cases(id) ON DELETE RESTRICT,
+    examination_id INTEGER NOT NULL UNIQUE REFERENCES examinations(id) ON DELETE RESTRICT,
+    discipline TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN (
+        'draft','review','revision','approved','issued','withdrawn'
+    )),
+    current_version_no INTEGER NOT NULL DEFAULT 0,
+    approved_version_id INTEGER REFERENCES opinion_versions(id),
+    produced_by TEXT NOT NULL,
+    due_at TEXT,
+    issued_at TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_opinions_status ON appraisal_opinions(status,due_at);
+CREATE TABLE IF NOT EXISTS opinion_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opinion_id INTEGER NOT NULL REFERENCES appraisal_opinions(id) ON DELETE CASCADE,
+    version_no INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    cited_specimen_ids_json TEXT NOT NULL DEFAULT '[]',
+    cited_observation_ids_json TEXT NOT NULL DEFAULT '[]',
+    cited_protocol_id INTEGER REFERENCES examination_protocols(id),
+    cited_protocol_version INTEGER,
+    declaration_note TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(opinion_id,version_no)
+);
+CREATE INDEX IF NOT EXISTS idx_opinion_versions_no ON opinion_versions(opinion_id,version_no);
+-- 领取（含并发唯一约束）、逾期改派与完整责任链
+CREATE TABLE IF NOT EXISTS review_assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opinion_id INTEGER NOT NULL REFERENCES appraisal_opinions(id) ON DELETE RESTRICT,
+    sequence_no INTEGER NOT NULL,
+    version_id INTEGER NOT NULL REFERENCES opinion_versions(id),
+    version_no INTEGER NOT NULL,
+    reviewer TEXT,
+    status TEXT NOT NULL DEFAULT 'pool' CHECK(status IN ('pool','open','claimed','reviewing','returned','completed','expired_reassigned')),
+    claimed_by TEXT,
+    claimed_at TEXT,
+    deadline_at TEXT,
+    completed_at TEXT,
+    review_decision TEXT CHECK(review_decision IN ('returned','approved')),
+    review_note TEXT NOT NULL DEFAULT '',
+    reassignment_reason TEXT NOT NULL DEFAULT '',
+    reassigned_by TEXT,
+    superseded_by_assignment_id INTEGER,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(opinion_id,sequence_no)
+);
+CREATE INDEX IF NOT EXISTS idx_assignments_reviewer ON review_assignments(reviewer,status);
+-- 复核问题：定位、严重程度、处理结论，阻断项关闭后才能签发
+CREATE TABLE IF NOT EXISTS review_findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES review_assignments(id) ON DELETE RESTRICT,
+    opinion_id INTEGER NOT NULL REFERENCES appraisal_opinions(id) ON DELETE CASCADE,
+    version_id INTEGER NOT NULL REFERENCES opinion_versions(id),
+    version_no INTEGER NOT NULL,
+    sequence_no INTEGER NOT NULL,
+    location TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK(severity IN ('minor','major','blocking')),
+    description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','resolved','accepted','rejected')),
+    resolution_note TEXT NOT NULL DEFAULT '',
+    resolved_by TEXT,
+    resolved_at TEXT,
+    resolution_version_id INTEGER REFERENCES opinion_versions(id),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(assignment_id,sequence_no)
+);
+CREATE INDEX IF NOT EXISTS idx_findings_opinion ON review_findings(opinion_id,status);
+-- 问题处理过程：复核通过的内容不得随正文改写而丢失
+CREATE TABLE IF NOT EXISTS review_finding_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    finding_id INTEGER NOT NULL REFERENCES review_findings(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL CHECK(event_type IN ('raised','responded','closed','reopened')),
+    from_status TEXT,
+    to_status TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    actor TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_finding_events ON review_finding_events(finding_id,id);
+CREATE TABLE IF NOT EXISTS opinion_issuances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opinion_id INTEGER NOT NULL UNIQUE REFERENCES appraisal_opinions(id) ON DELETE RESTRICT,
+    version_id INTEGER NOT NULL REFERENCES opinion_versions(id),
+    content_hash TEXT NOT NULL,
+    issued_by TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    basis_note TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS opinion_journal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opinion_id INTEGER NOT NULL REFERENCES appraisal_opinions(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    version_no INTEGER,
+    version_id INTEGER,
+    assignment_id INTEGER,
+    finding_id INTEGER,
+    actor TEXT NOT NULL DEFAULT '',
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_opinion_journal ON opinion_journal(opinion_id,id);
 CREATE TABLE IF NOT EXISTS outbox_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_key TEXT NOT NULL UNIQUE,
@@ -411,6 +541,11 @@ PERMISSIONS = [
     ("examination.write", "执行检验任务", "examination", "write"),
     ("quality.review", "复核质量结果", "quality", "review"),
     ("release.approve", "审批鉴定领用", "release", "approve"),
+    ("opinion.write", "起草鉴定意见", "opinion", "write"),
+    ("opinion.read", "查看鉴定意见与复核轨迹", "opinion", "read"),
+    ("opinion.review", "复核鉴定意见", "opinion", "review"),
+    ("opinion.issue", "签发鉴定意见", "opinion", "issue"),
+    ("opinion.admin", "质量负责人改派逾期复核", "opinion", "admin"),
 ]
 
 
@@ -482,6 +617,7 @@ def init_db() -> None:
             ("registrar", "检材登记员", "登记案件检材并维护保管信息"),
             ("technician", "鉴定技术员", "执行取样与专业检验"),
             ("curator", "案件审核员", "复核鉴定质量与领用"),
+            ("quality_officer", "质量负责人", "签发鉴定意见并重新分派逾期复核"),
             ("auditor", "审计查看员", "只读查看业务和审计记录"),
         ]
         for code, name, description in roles:
@@ -496,9 +632,21 @@ def init_db() -> None:
         )
         role_permissions = {
             "registrar": ["forensic_cases.read", "forensic_cases.write", "custody.read", "custody.write"],
-            "technician": ["forensic_cases.read", "custody.read", "examination.read", "examination.write"],
-            "curator": ["forensic_cases.read", "custody.read", "examination.read", "quality.review", "release.approve"],
-            "auditor": ["forensic_cases.read", "custody.read", "examination.read", "audit.read"],
+            "technician": [
+                "forensic_cases.read", "custody.read", "examination.read", "examination.write",
+                "opinion.read", "opinion.write",
+            ],
+            "curator": [
+                "forensic_cases.read", "custody.read", "examination.read", "quality.review",
+                "release.approve", "opinion.read", "opinion.review",
+            ],
+            "quality_officer": [
+                "forensic_cases.read", "custody.read", "examination.read",
+                "opinion.read", "opinion.review", "opinion.issue", "opinion.admin",
+            ],
+            "auditor": [
+                "forensic_cases.read", "custody.read", "examination.read", "opinion.read", "audit.read",
+            ],
         }
         for role_code, codes in role_permissions.items():
             role_id = connection.execute("SELECT id FROM roles WHERE code=?", (role_code,)).fetchone()[0]

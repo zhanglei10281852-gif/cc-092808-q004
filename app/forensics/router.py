@@ -32,6 +32,18 @@ from app.forensics.schemas import (
     ExaminationStart,
     WithdrawalCreate,
 )
+from app.forensics.opinion_schemas import (
+    FindingResponse,
+    FindingSubmit,
+    IssueRequest,
+    OpinionCreate,
+    OpinionRevisionCreate,
+    ReassignRequest,
+    ResubmitRequest,
+    ReviewClaim,
+    ReviewDecision,
+    ReviewerQualificationCreate,
+)
 from app.forensics.service import ForensicService
 
 
@@ -352,3 +364,120 @@ def decide_release(
 def release_detail(request_id: int, principal: Principal = Depends(current_principal)) -> dict:
     principal.require("forensic_cases.read")
     return _service().repository.release_detail(request_id)
+
+
+# ---------------------------------------------------------------- 鉴定意见签发前复核
+
+
+@router.post("/reviewers", status_code=201)
+def register_reviewer(data: ReviewerQualificationCreate, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.admin")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.register_reviewer(data.model_dump(mode="json"))
+
+
+@router.post("/reviewers/{qualification_id}/status")
+def set_reviewer_status(
+    qualification_id: int, active: bool, principal: Principal = Depends(current_principal)
+) -> dict:
+    principal.require("opinion.admin")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.set_reviewer_status(qualification_id, active)
+
+
+@router.get("/review-assignments/overdue")
+def overdue_review_assignments(principal: Principal = Depends(current_principal)) -> list[dict]:
+    principal.require("opinion.admin")
+    return _service().opinions.overdue_assignments()
+
+
+@router.get("/opinions/{opinion_id}/eligible-reviewers")
+def eligible_reviewers(opinion_id: int, principal: Principal = Depends(current_principal)) -> list[dict]:
+    principal.require("opinion.read")
+    return _service().opinions.eligible_reviewers(opinion_id)
+
+
+@router.post("/opinions", status_code=201)
+def create_opinion(data: OpinionCreate, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.write")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.create_opinion(data.model_dump(mode="json"))
+
+
+@router.get("/opinions/{opinion_id}")
+def opinion_detail(opinion_id: int, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.read")
+    return _service().opinions.opinion_detail(opinion_id)
+
+
+@router.get("/opinions/{opinion_id}/timeline")
+def opinion_timeline(opinion_id: int, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.read")
+    return _service().opinions.timeline(opinion_id)
+
+
+@router.post("/opinions/{opinion_id}/revisions", status_code=201)
+def add_revision(opinion_id: int, data: OpinionRevisionCreate, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.write")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.add_revision(opinion_id, data.model_dump(mode="json"))
+
+
+@router.post("/opinions/{opinion_id}/resubmit")
+def resubmit_opinion(opinion_id: int, data: ResubmitRequest, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.write")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.resubmit(opinion_id, data.model_dump(mode="json"))
+
+
+@router.post("/opinions/{opinion_id}/claim")
+def claim_opinion(opinion_id: int, data: ReviewClaim, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.review")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.claim(opinion_id, data.reviewer)
+
+
+@router.post("/opinions/{opinion_id}/findings", status_code=201)
+def add_finding(opinion_id: int, data: FindingSubmit, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.review")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.add_finding(
+            opinion_id, data.reviewer, data.model_dump(mode="json", exclude={"reviewer"})
+        )
+
+
+@router.post("/findings/{finding_id}/response")
+def respond_finding(finding_id: int, data: FindingResponse, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.write")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.respond_finding(finding_id, data.model_dump(mode="json"))
+
+
+@router.post("/findings/{finding_id}/confirm")
+def confirm_finding(finding_id: int, data: FindingResponse, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.review")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.close_finding(
+            finding_id, data.actor, data.accept, data.note
+        )
+
+
+@router.post("/opinions/{opinion_id}/review-decision")
+def decide_review(opinion_id: int, data: ReviewDecision, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.review")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.decide_review(opinion_id, data.model_dump(mode="json"))
+
+
+@router.post("/opinions/{opinion_id}/reassign")
+def reassign_opinion(opinion_id: int, data: ReassignRequest, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.admin")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.reassign_overdue(opinion_id, data.model_dump(mode="json"))
+
+
+@router.post("/opinions/{opinion_id}/issue")
+def issue_opinion(opinion_id: int, data: IssueRequest, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.issue")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.issue(opinion_id, data.model_dump(mode="json"))
