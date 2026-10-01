@@ -375,6 +375,132 @@ CREATE TABLE IF NOT EXISTS release_items (
     status TEXT NOT NULL DEFAULT 'requested' CHECK(status IN ('requested','allocated','fulfilled','unavailable')),
     UNIQUE(request_id,case_id)
 );
+CREATE TABLE IF NOT EXISTS expert_opinions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opinion_no TEXT NOT NULL UNIQUE,
+    case_id INTEGER NOT NULL REFERENCES forensic_cases(id) ON DELETE RESTRICT,
+    examination_id INTEGER NOT NULL REFERENCES examinations(id) ON DELETE RESTRICT,
+    discipline TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','pending_review','in_review','returned','review_passed','issued')),
+    expert_id INTEGER NOT NULL REFERENCES users(id),
+    expert_name TEXT NOT NULL,
+    current_version_no INTEGER NOT NULL DEFAULT 0,
+    approved_version_id INTEGER REFERENCES opinion_versions(id),
+    issued_version_id INTEGER REFERENCES opinion_versions(id),
+    issued_by INTEGER REFERENCES users(id),
+    issued_by_name TEXT,
+    issued_at TEXT,
+    issue_evidence_json TEXT NOT NULL DEFAULT '{}',
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_opinions_case ON expert_opinions(case_id,status);
+CREATE INDEX IF NOT EXISTS idx_opinions_expert ON expert_opinions(expert_id,status);
+CREATE TABLE IF NOT EXISTS opinion_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opinion_id INTEGER NOT NULL REFERENCES expert_opinions(id) ON DELETE CASCADE,
+    version_no INTEGER NOT NULL,
+    parent_version_id INTEGER REFERENCES opinion_versions(id),
+    report_sections_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    change_summary TEXT NOT NULL DEFAULT '',
+    submitted_by INTEGER NOT NULL REFERENCES users(id),
+    submitted_by_name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(opinion_id,version_no)
+);
+CREATE TABLE IF NOT EXISTS opinion_version_references (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_id INTEGER NOT NULL REFERENCES opinion_versions(id) ON DELETE CASCADE,
+    ref_type TEXT NOT NULL CHECK(ref_type IN ('specimen','observation','protocol')),
+    ref_id INTEGER NOT NULL,
+    ref_label TEXT NOT NULL DEFAULT '',
+    snapshot_json TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(version_id,ref_type,ref_id)
+);
+CREATE INDEX IF NOT EXISTS idx_opinion_refs_version ON opinion_version_references(version_id,ref_type);
+CREATE TABLE IF NOT EXISTS review_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opinion_id INTEGER NOT NULL REFERENCES expert_opinions(id) ON DELETE CASCADE,
+    version_id INTEGER NOT NULL REFERENCES opinion_versions(id) ON DELETE RESTRICT,
+    round_no INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','claimed','approved','returned','reassigned')),
+    reviewer_id INTEGER REFERENCES users(id),
+    reviewer_name TEXT,
+    assigned_by INTEGER REFERENCES users(id),
+    assigned_by_name TEXT,
+    reassigned_from_task_id INTEGER REFERENCES review_tasks(id),
+    claim_due_at TEXT NOT NULL,
+    review_due_at TEXT,
+    claimed_at TEXT,
+    completed_at TEXT,
+    reassigned_at TEXT,
+    result TEXT,
+    summary TEXT NOT NULL DEFAULT '',
+    confirmed_sections_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_review_tasks_opinion ON review_tasks(opinion_id,round_no);
+CREATE INDEX IF NOT EXISTS idx_review_tasks_due ON review_tasks(status,claim_due_at,review_due_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_review_tasks_single_active
+    ON review_tasks(opinion_id) WHERE status IN ('pending','claimed');
+CREATE TABLE IF NOT EXISTS review_findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opinion_id INTEGER NOT NULL REFERENCES expert_opinions(id) ON DELETE CASCADE,
+    task_id INTEGER NOT NULL REFERENCES review_tasks(id) ON DELETE CASCADE,
+    version_id INTEGER NOT NULL REFERENCES opinion_versions(id) ON DELETE RESTRICT,
+    round_no INTEGER NOT NULL,
+    location_ref TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK(severity IN ('minor','major','critical')),
+    handling TEXT NOT NULL CHECK(handling IN ('must_revise','explain','note')),
+    blocking INTEGER NOT NULL CHECK(blocking IN (0,1)),
+    description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','resolved','rejected')),
+    resolution_note TEXT NOT NULL DEFAULT '',
+    resolved_by INTEGER REFERENCES users(id),
+    resolved_by_name TEXT,
+    resolved_at TEXT,
+    addressed_in_version_id INTEGER REFERENCES opinion_versions(id),
+    raised_by INTEGER NOT NULL REFERENCES users(id),
+    raised_by_name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_findings_opinion ON review_findings(opinion_id,status);
+CREATE TABLE IF NOT EXISTS finding_responses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    finding_id INTEGER NOT NULL REFERENCES review_findings(id) ON DELETE CASCADE,
+    version_id INTEGER NOT NULL REFERENCES opinion_versions(id) ON DELETE CASCADE,
+    response_text TEXT NOT NULL,
+    responded_by INTEGER NOT NULL REFERENCES users(id),
+    responded_by_name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(finding_id,version_id)
+);
+CREATE INDEX IF NOT EXISTS idx_finding_responses_finding ON finding_responses(finding_id);
+CREATE TABLE IF NOT EXISTS opinion_conflicts (
+    opinion_id INTEGER NOT NULL REFERENCES expert_opinions(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL DEFAULT '',
+    added_by INTEGER REFERENCES users(id),
+    added_by_name TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(opinion_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS opinion_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opinion_id INTEGER NOT NULL REFERENCES expert_opinions(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    actor_id INTEGER,
+    actor_name TEXT NOT NULL DEFAULT '',
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_opinion_events ON opinion_events(opinion_id,id);
+
 CREATE TABLE IF NOT EXISTS outbox_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_key TEXT NOT NULL UNIQUE,
@@ -411,6 +537,11 @@ PERMISSIONS = [
     ("examination.write", "执行检验任务", "examination", "write"),
     ("quality.review", "复核质量结果", "quality", "review"),
     ("release.approve", "审批鉴定领用", "release", "approve"),
+    ("opinion.read", "查看鉴定意见", "opinion", "read"),
+    ("opinion.write", "撰写鉴定意见", "opinion", "write"),
+    ("opinion.review", "复核签发前鉴定意见", "opinion", "review"),
+    ("opinion.issue", "签发鉴定意见", "opinion", "issue"),
+    ("opinion.dispatch", "质量负责人分派复核", "opinion", "dispatch"),
 ]
 
 
@@ -482,6 +613,7 @@ def init_db() -> None:
             ("registrar", "检材登记员", "登记案件检材并维护保管信息"),
             ("technician", "鉴定技术员", "执行取样与专业检验"),
             ("curator", "案件审核员", "复核鉴定质量与领用"),
+            ("quality_manager", "质量负责人", "分派复核、处理逾期并签发鉴定意见"),
             ("auditor", "审计查看员", "只读查看业务和审计记录"),
         ]
         for code, name, description in roles:
@@ -496,9 +628,19 @@ def init_db() -> None:
         )
         role_permissions = {
             "registrar": ["forensic_cases.read", "forensic_cases.write", "custody.read", "custody.write"],
-            "technician": ["forensic_cases.read", "custody.read", "examination.read", "examination.write"],
-            "curator": ["forensic_cases.read", "custody.read", "examination.read", "quality.review", "release.approve"],
-            "auditor": ["forensic_cases.read", "custody.read", "examination.read", "audit.read"],
+            "technician": [
+                "forensic_cases.read", "custody.read", "examination.read", "examination.write",
+                "opinion.read", "opinion.write",
+            ],
+            "curator": [
+                "forensic_cases.read", "custody.read", "examination.read", "quality.review",
+                "release.approve", "opinion.read", "opinion.review",
+            ],
+            "quality_manager": [
+                "forensic_cases.read", "custody.read", "examination.read", "quality.review",
+                "opinion.read", "opinion.review", "opinion.issue", "opinion.dispatch",
+            ],
+            "auditor": ["forensic_cases.read", "custody.read", "examination.read", "audit.read", "opinion.read"],
         }
         for role_code, codes in role_permissions.items():
             role_id = connection.execute("SELECT id FROM roles WHERE code=?", (role_code,)).fetchone()[0]

@@ -302,3 +302,77 @@ class Page(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class OpinionCreate(BaseModel):
+    opinion_no: str = Field(min_length=3, max_length=60)
+    case_id: int = Field(gt=0)
+    examination_id: int = Field(gt=0)
+    title: str = Field(default="", max_length=300)
+
+    @field_validator("opinion_no")
+    @classmethod
+    def normalize_opinion_no(cls, value: str) -> str:
+        return value.strip().upper()
+
+
+class ReferenceDecl(BaseModel):
+    ref_type: str = Field(pattern="^(specimen|observation|protocol)$")
+    ref_id: int = Field(gt=0)
+    ref_label: str = Field(default="", max_length=200)
+
+
+class FindingResponseInput(BaseModel):
+    finding_id: int = Field(gt=0)
+    response_text: str = Field(min_length=2, max_length=2000)
+
+
+class OpinionSubmission(BaseModel):
+    sections: dict[str, str] = Field(min_length=1)
+    references: list[ReferenceDecl] = Field(min_length=1, max_length=200)
+    change_summary: str = Field(default="", max_length=1000)
+    responses: list[FindingResponseInput] = Field(default_factory=list, max_length=500)
+
+    @field_validator("sections")
+    @classmethod
+    def sections_non_empty(cls, value: dict[str, str]) -> dict[str, str]:
+        if any(not key.strip() or not str(text).strip() for key, text in value.items()):
+            raise ValueError("报告章节名和正文都不能为空")
+        if len(value) > 100:
+            raise ValueError("报告章节数量不能超过 100")
+        return {key.strip(): str(text) for key, text in value.items()}
+
+
+class FindingCreate(BaseModel):
+    location_ref: str = Field(min_length=2, max_length=300)
+    severity: str = Field(pattern="^(minor|major|critical)$")
+    handling: str = Field(pattern="^(must_revise|explain|note)$")
+    description: str = Field(min_length=3, max_length=2000)
+
+
+class FindingResolution(BaseModel):
+    status: str = Field(pattern="^(resolved|rejected)$")
+    note: str = Field(min_length=2, max_length=2000)
+
+
+class FindingBatchResolution(FindingResolution):
+    finding_id: int = Field(gt=0)
+
+
+class ReviewDecision(BaseModel):
+    approve: bool
+    summary: str = Field(default="", max_length=2000)
+    confirmed_sections: list[str] = Field(default_factory=list, max_length=100)
+    resolutions: list[FindingBatchResolution] = Field(default_factory=list, max_length=500)
+
+
+class ReassignRequest(BaseModel):
+    reviewer_id: int | None = Field(default=None, gt=0)
+    claim_due_hours: int = Field(default=48, ge=1, le=24 * 365)
+    review_due_hours: int = Field(default=168, ge=1, le=24 * 365 * 6)
+    reason: str = Field(min_length=2, max_length=500)
+
+
+class ConflictRequest(BaseModel):
+    user_id: int = Field(gt=0)
+    reason: str = Field(default="", max_length=500)

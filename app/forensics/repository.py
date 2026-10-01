@@ -12,6 +12,10 @@ JSON_COLUMNS = {
     "contact_json": "restrictions",
     "detail_json": "detail",
     "payload_json": "payload",
+    "report_sections_json": "sections",
+    "issue_evidence_json": "issue_evidence",
+    "confirmed_sections_json": "confirmed_sections",
+    "snapshot_json": "snapshot",
 }
 
 
@@ -205,8 +209,95 @@ class ForensicRepository:
     def count_table(self, table: str) -> int:
         allowed = {
             "forensic_cases", "specimens", "storage_locations", "examinations",
-            "review_schedules", "quality_alerts", "release_requests",
+            "review_schedules", "quality_alerts", "release_requests", "expert_opinions",
+            "opinion_versions", "review_tasks", "review_findings",
         }
         if table not in allowed:
             raise ValueError("不允许统计该数据表")
         return int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+    def require_opinion(self, opinion_id: int) -> dict[str, Any]:
+        item = record(self.connection.execute("SELECT * FROM expert_opinions WHERE id=?", (opinion_id,)).fetchone())
+        if item is None:
+            raise NotFoundError("鉴定意见不存在")
+        return item
+
+    def opinion_by_number(self, opinion_no: str) -> dict[str, Any] | None:
+        return record(self.connection.execute("SELECT * FROM expert_opinions WHERE opinion_no=?", (opinion_no,)).fetchone())
+
+    def require_version(self, version_id: int) -> dict[str, Any]:
+        item = record(self.connection.execute("SELECT * FROM opinion_versions WHERE id=?", (version_id,)).fetchone())
+        if item is None:
+            raise NotFoundError("报告版本不存在")
+        return item
+
+    def opinion_version(self, opinion_id: int, version_no: int) -> dict[str, Any] | None:
+        return record(self.connection.execute(
+            "SELECT * FROM opinion_versions WHERE opinion_id=? AND version_no=?", (opinion_id, version_no)
+        ).fetchone())
+
+    def latest_version(self, opinion_id: int) -> dict[str, Any] | None:
+        return record(self.connection.execute(
+            "SELECT * FROM opinion_versions WHERE opinion_id=? ORDER BY version_no DESC LIMIT 1", (opinion_id,)
+        ).fetchone())
+
+    def version_references(self, version_id: int) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT * FROM opinion_version_references WHERE version_id=? ORDER BY ref_type,id", (version_id,)
+        ).fetchall())
+
+    def require_task(self, task_id: int) -> dict[str, Any]:
+        item = record(self.connection.execute("SELECT * FROM review_tasks WHERE id=?", (task_id,)).fetchone())
+        if item is None:
+            raise NotFoundError("复核任务不存在")
+        return item
+
+    def opinion_active_task(self, opinion_id: int) -> dict[str, Any] | None:
+        return record(self.connection.execute(
+            "SELECT * FROM review_tasks WHERE opinion_id=? AND status IN ('pending','claimed') ORDER BY id DESC LIMIT 1",
+            (opinion_id,),
+        ).fetchone())
+
+    def require_finding(self, finding_id: int) -> dict[str, Any]:
+        item = record(self.connection.execute("SELECT * FROM review_findings WHERE id=?", (finding_id,)).fetchone())
+        if item is None:
+            raise NotFoundError("复核问题不存在")
+        return item
+
+    def opinion_findings(self, opinion_id: int) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT * FROM review_findings WHERE opinion_id=? ORDER BY round_no,id", (opinion_id,)
+        ).fetchall())
+
+    def task_findings(self, task_id: int) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT * FROM review_findings WHERE task_id=? ORDER BY id", (task_id,)
+        ).fetchall())
+
+    def finding_responses(self, finding_id: int) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT * FROM finding_responses WHERE finding_id=? ORDER BY version_id,id", (finding_id,)
+        ).fetchall())
+
+    def opinion_conflicts(self, opinion_id: int) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT c.*,u.username,u.display_name FROM opinion_conflicts c "
+            "JOIN users u ON u.id=c.user_id WHERE c.opinion_id=? ORDER BY c.user_id", (opinion_id,)
+        ).fetchall())
+
+    def user_permissions(self, user_id: int) -> set[str]:
+        rows = self.connection.execute(
+            "SELECT DISTINCT p.code FROM permissions p "
+            "JOIN role_permissions rp ON rp.permission_id=p.id "
+            "JOIN user_roles ur ON ur.role_id=rp.role_id WHERE ur.user_id=?",
+            (user_id,),
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def require_user(self, user_id: int) -> dict[str, Any]:
+        item = record(self.connection.execute(
+            "SELECT id,username,display_name,department_id,status FROM users WHERE id=?", (user_id,)
+        ).fetchone())
+        if item is None:
+            raise NotFoundError("用户不存在")
+        return item

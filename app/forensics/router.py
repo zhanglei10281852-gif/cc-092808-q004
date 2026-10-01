@@ -13,9 +13,16 @@ from app.forensics.schemas import (
     ForensicCasePatch,
     ForensicCaseTransition,
     AlertDecision,
+    ConflictRequest,
+    FindingCreate,
+    FindingResolution,
     ObservationCreate,
+    OpinionCreate,
+    OpinionSubmission,
+    ReassignRequest,
     ReleaseCreate,
     ReleaseDecision,
+    ReviewDecision,
     HoldCreate,
     HoldRelease,
     LocationCreate,
@@ -36,10 +43,15 @@ from app.forensics.service import ForensicService
 
 
 router = APIRouter(prefix="/api/forensics", tags=["鉴定案件"])
+review_router = APIRouter(prefix="/api/forensics", tags=["签发前复核"])
 
 
 def _service() -> ForensicService:
     return ForensicService(get_connection())
+
+
+def _actor(principal: Principal) -> dict:
+    return {"id": principal.user_id, "display_name": principal.display_name}
 
 
 @router.get("/dashboard")
@@ -352,3 +364,134 @@ def decide_release(
 def release_detail(request_id: int, principal: Principal = Depends(current_principal)) -> dict:
     principal.require("forensic_cases.read")
     return _service().repository.release_detail(request_id)
+
+
+# ============================================================ 签发前复核流程
+
+@review_router.post("/opinions", status_code=201)
+def create_opinion(data: OpinionCreate, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.write")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.create_opinion(data.model_dump(mode="json"), _actor(principal))
+
+
+@review_router.get("/opinions/{opinion_id}")
+def opinion_detail(opinion_id: int, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.read")
+    return _service().opinions.detail(opinion_id)
+
+
+@review_router.get("/opinions/{opinion_id}/timeline")
+def opinion_timeline(opinion_id: int, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.read")
+    return _service().opinions.timeline(opinion_id)
+
+
+@review_router.post("/opinions/{opinion_id}/versions", status_code=201)
+def submit_opinion_version(
+    opinion_id: int,
+    data: OpinionSubmission,
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("opinion.write")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.submit_version(
+            opinion_id, data.model_dump(mode="json"), _actor(principal)
+        )
+
+
+@review_router.post("/opinions/{opinion_id}/conflicts", status_code=201)
+def add_opinion_conflict(
+    opinion_id: int,
+    data: ConflictRequest,
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("opinion.dispatch")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.add_conflict(
+            opinion_id, data.model_dump(mode="json"), _actor(principal)
+        )
+
+
+@review_router.get("/review-tasks/pending")
+def pending_review_tasks(principal: Principal = Depends(current_principal)) -> list[dict]:
+    principal.require("opinion.review")
+    return _service().opinions.pending_task_pool(_actor(principal))
+
+
+@review_router.get("/review-tasks/overdue")
+def overdue_review_tasks(principal: Principal = Depends(current_principal)) -> list[dict]:
+    principal.require("opinion.dispatch")
+    return _service().opinions.overdue_tasks()
+
+
+@review_router.get("/review-tasks/{task_id}")
+def review_task_detail(task_id: int, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.read")
+    return _service().opinions.task_detail(task_id)
+
+
+@review_router.post("/review-tasks/{task_id}/claim", status_code=201)
+def claim_review_task(task_id: int, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.review")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.claim_task(task_id, _actor(principal))
+
+
+@review_router.post("/review-tasks/{task_id}/findings", status_code=201)
+def raise_review_finding(
+    task_id: int,
+    data: FindingCreate,
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("opinion.review")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.add_finding(
+            task_id, data.model_dump(mode="json"), _actor(principal)
+        )
+
+
+@review_router.post("/findings/{finding_id}/resolve")
+def resolve_review_finding(
+    finding_id: int,
+    data: FindingResolution,
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("opinion.review")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.resolve_finding(
+            finding_id, data.status, data.note, _actor(principal)
+        )
+
+
+@review_router.post("/review-tasks/{task_id}/decision")
+def decide_review_task(
+    task_id: int,
+    data: ReviewDecision,
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("opinion.review")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.decide_review(
+            task_id, data.model_dump(mode="json"), _actor(principal)
+        )
+
+
+@review_router.post("/review-tasks/{task_id}/reassign")
+def reassign_review_task(
+    task_id: int,
+    data: ReassignRequest,
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("opinion.dispatch")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.reassign_task(
+            task_id, data.model_dump(mode="json"), _actor(principal)
+        )
+
+
+@review_router.post("/opinions/{opinion_id}/issue")
+def issue_opinion(opinion_id: int, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("opinion.issue")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).opinions.issue_opinion(opinion_id, _actor(principal))
